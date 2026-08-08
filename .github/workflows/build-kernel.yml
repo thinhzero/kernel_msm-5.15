@@ -18,10 +18,10 @@ on:
           - kittisu
           - none
       enable_susfs:
-        description: "Enable SUSFS (only works with root solution)"
+        description: "Enable SUSFS — WARNING: switches hook method to SUSFS Inline Hook (Kconfig choice), replacing Tracepoint Hook. This breaks Manager version detection (shows 0) and zygisk. Only enable if you need SUSFS hiding features and accept losing zygisk/Manager support."
         required: true
         type: boolean
-        default: true
+        default: false
       enable_bbg:
         description: "Enable Baseband Guard (only works with root solution)"
         required: true

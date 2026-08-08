@@ -421,9 +421,15 @@ jobs:
           # Disable device codename whitelist check: the YASK template ships
           # device.name1-6 for an unrelated device family (topaz/tapas/sapphiren/
           # sapphire/xun/creek), so do_devicecheck() aborts with "Unsupported
-          # device" on any of our targets. supported.versions=13-17 already
-          # covers Android 13-17 and is left untouched.
+          # device" on any of our targets.
           sed -i 's/^do\.devicecheck=1/do.devicecheck=0/' AnyKernel3/anykernel.sh
+
+          # Disable Android version check too: do_versioncheck() parses
+          # ro.build.version.release through int2ver()+sort -g, which breaks
+          # on non-clean version strings (confirmed failing even on sapphire,
+          # which passed do_devicecheck, with "Unsupported Android version").
+          # Blanking supported.versions makes do_versioncheck() return early.
+          sed -i 's/^supported\.versions=.*/supported.versions=/' AnyKernel3/anykernel.sh
 
           # Copy kernel images
           find ./artifacts -name "Image.*" -exec cp {} AnyKernel3/ \;

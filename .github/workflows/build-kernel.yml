@@ -102,7 +102,15 @@ jobs:
             echo "OUTPUT_NAME=Image.${KNAME,,}.noksu" >> $GITHUB_ENV
           else
             echo "LOCAL_VERSION=-${{ github.event.inputs.kernel_name }}-${KNAME}-${ROOT}" >> $GITHUB_ENV
-            echo "OUTPUT_NAME=Image.${KNAME,,}.${ROOT}" >> $GITHUB_ENV
+            # NOTE: suffix must be "ksu" here, not "$ROOT" (e.g. "kittisu").
+            # AnyKernel3's stock choose_ksu() menu (YASK template,
+            # anykernel.sh) always constructs Image.${kernel_type}.ksu when
+            # "With KSU" is selected, regardless of which root solution was
+            # built. Using "$ROOT" as the suffix meant that file never
+            # existed under the name the menu looked for, so flashing
+            # always hit "abort: Kernel file not found" no matter what the
+            # user picked at the volume-key prompt.
+            echo "OUTPUT_NAME=Image.${KNAME,,}.ksu" >> $GITHUB_ENV
           fi
 
       - name: "📐 Setup SWAP 10GB"

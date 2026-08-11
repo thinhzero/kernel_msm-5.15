@@ -44,6 +44,10 @@ on:
           - full
           - thin
           - none
+      force_ksu_version:
+        description: "Force KSU version code (e.g. 35085) instead of the git-commit-based calculation in Kbuild. Leave empty to use the default computed value."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -235,6 +239,18 @@ jobs:
           echo "📦 Installing $ROOT using setup.sh..."
           curl -LSs "$SETUP_URL" | bash -s main
           echo "✔ $ROOT installed successfully"
+
+      - name: "🔒 Force KSU version override"
+        if: github.event.inputs.root_solution != 'none' && github.event.inputs.force_ksu_version != ''
+        working-directory: ${{ env.KERNEL_LOC_DIR }}/${{ env.KERNEL_NAME }}
+        run: |
+          FORCE_VER="${{ github.event.inputs.force_ksu_version }}"
+          # Replace the computed "KSU_VERSION := $(shell expr 30000 + ... )"
+          # line in Kbuild with a hardcoded value, instead of letting it be
+          # derived from git rev-list --count HEAD.
+          sed -i "s|^KSU_VERSION := .*|KSU_VERSION := ${FORCE_VER}|" KernelSU/kernel/Kbuild
+          echo "✔ Forced KSU_VERSION to ${FORCE_VER}:"
+          grep "^KSU_VERSION :=" KernelSU/kernel/Kbuild
 
       # ──────────────────────────────────────────────
       # 7. SUSFS integration (optional, only with root)

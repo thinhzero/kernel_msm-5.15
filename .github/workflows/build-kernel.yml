@@ -34,7 +34,7 @@ on:
       kernel_name:
         description: "Custom kernel name suffix (e.g. MyKernel)"
         required: false
-        default: "GKI-Custom"
+        default: "dino"
       lto_type:
         description: "LTO type"
         required: true
@@ -230,7 +230,7 @@ jobs:
           if [ "$ROOT" = "resukisu" ]; then
             SETUP_URL="https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh"
           elif [ "$ROOT" = "kittisu" ]; then
-            SETUP_URL="https://raw.githubusercontent.com/terebiko/KittiSU/main/kernel/setup.sh"
+            SETUP_URL="https://raw.githubusercontent.com/terebiko/KittiSU/dev/kernel/setup.sh"
           else
             echo "❌ Unknown root solution: $ROOT"
             exit 1

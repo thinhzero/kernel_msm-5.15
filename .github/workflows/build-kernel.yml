@@ -224,6 +224,12 @@ jobs:
         run: |
           rm -rf ./KernelSU ./drivers/kernelsu
 
+          # Without this, git commands run by KernelSU/KittiSU's own
+          # Kbuild (e.g. git rev-list --count HEAD for KSU_VERSION) can
+          # fail with "detected dubious ownership" on GH Actions runners,
+          # silently breaking version tracking downstream.
+          git config --global --add safe.directory "*"
+
           ROOT="${{ env.ROOT_SOLUTION }}"
 
           # Select the correct setup.sh URL based on root solution
@@ -387,6 +393,9 @@ jobs:
           CONFIG_TMPFS_XATTR=y
           CONFIG_TMPFS_POSIX_ACL=y
           CONFIG_KALLSYMS=y
+          CONFIG_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_HAVE_KPROBES=y
           EOF
 
           echo "✅ Basic configs added"

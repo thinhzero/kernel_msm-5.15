@@ -9,11 +9,19 @@ on:
   schedule:
     - cron: '0 0 * * 0'
   workflow_dispatch:
+    inputs:
+      test_only:
+        description: "Build and package without publishing a release or notifications"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
         
 jobs:
   build-kernels:
     name: "🐎 Build YASK ${{ matrix.kernel.name }} kernel"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -185,37 +193,16 @@ jobs:
           echo "📦 Cloning SUSFS4KSU for kernel patches..."
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
 
-          echo "☣️ Applying namespace.c Fake Patch (if applicable)"
-          if grep -q '^#include <trace/hooks/blk.h>$' fs/namespace.c; then
-            sed -i '/^#include <trace\/hooks\/blk.h>$/d' fs/namespace.c
-            NS_FAKE_PATCHED=1
-          else
-            echo "ℹ️ blk.h include not present in fs/namespace.c — skipping fake patch"
-            NS_FAKE_PATCHED=0
-          fi
-
-          echo "☣️ Applying task_mmu.c Fake Patch (if applicable)"
-          if grep -q '^#include <trace/hooks/mm.h>$' fs/proc/task_mmu.c; then
-            sed -i '/^#include <trace\/hooks\/mm.h>$/d' fs/proc/task_mmu.c
-            MM_FAKE_PATCHED=1
-          else
-            echo "ℹ️ mm.h include not present in fs/proc/task_mmu.c — skipping fake patch"
-            MM_FAKE_PATCHED=0
-          fi
-          
           SUSFS_KERNEL_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          
-          echo "🔧 Applying SUSFS kernel patch..."
-          if patch -p1 < "$SUSFS_KERNEL_PATCH"; then
-            echo "✅ SUSFS patch successfully applied"
-          else
-            echo "⚠️ SUSFS patch failed — copying files manually"
-          fi
 
-          echo "🔧 Applying SUSFS -> KernelSU patch..."
-          KSU_PATCH="susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-          
-          echo "📄 Forcing SUSFS source injection..."
+          # The include hunks require the original Android trace-hook headers.
+          # Check the entire patch before applying it; copied source files cannot
+          # repair missing hooks, declarations or build wiring after a rejection.
+          echo "🔧 Applying SUSFS kernel patch..."
+          patch --batch --forward --dry-run -p1 < "$SUSFS_KERNEL_PATCH"
+          patch --batch --forward -p1 < "$SUSFS_KERNEL_PATCH"
+
+          echo "📄 Installing SUSFS sources and headers..."
           
           # Always replace fs/susfs.c
           mkdir -p fs
@@ -227,29 +214,14 @@ jobs:
           cp -f susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
           echo "✔ Copied include/linux/susfs.h"
           
-          # Also install missing susfs_def.h
-          if [ -f susfs4ksu/kernel_patches/include/linux/susfs_def.h ]; then
-            cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
-            echo "✔ Copied include/linux/susfs_def.h"
-          else
-            echo "⚠️ susfs_def.h not found in repo"
-          fi
-          
-          echo "🔍 Verifying SUSFS files..."
-          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
-            if [ -f "$f" ]; then echo "✔ Found: $f"; else echo "❌ Missing: $f"; fi
-          done
-          
+          cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
+
           # Clean up SUSFS repo (we only needed kernel patches, not KSU integration)
           rm -rf susfs4ksu
           
-          # Create symbolic link for drivers/kernelsu (if needed by build system)
-          if [ ! -L "drivers/kernelsu" ]; then
-            ln -sf ../KernelSU drivers/kernelsu
-            echo "✔ Created drivers/kernelsu symlink"
-          fi
-
-          echo "✅ SUSFS build wiring verified"
+          # ReSukiSU's setup script links drivers/kernelsu to KernelSU/kernel.
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
 
           CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_NAME }}"
           cat >> "$CONFIG_FILE" << 'EOF'
@@ -265,30 +237,6 @@ jobs:
           CONFIG_KSU_SUSFS_SUS_MAP=y
           EOF
 
-          echo "↩️ Reverting namespace.c Fake Patch (if applicable)"
-          if [ "$NS_FAKE_PATCHED" = "1" ] && ! grep -q 'trace/hooks/blk.h' fs/namespace.c; then
-            if grep -q '^#include "internal.h"$' fs/namespace.c; then
-              sed -i '/^#include "internal.h"$/a #include <trace/hooks/blk.h>' fs/namespace.c
-              echo "✔ Restored blk.h include"
-            else
-              echo "⚠️ Anchor #include \"internal.h\" not found — could not restore blk.h include, check fs/namespace.c manually"
-            fi
-          else
-            echo "ℹ️ Skipping blk.h restore (not fake-patched or already present)"
-          fi
-
-          echo "↩️ Reverting task_mmu.c Fake Patch (if applicable)"
-          if [ "$MM_FAKE_PATCHED" = "1" ] && ! grep -q 'trace/hooks/mm.h' fs/proc/task_mmu.c; then
-            if grep -q '^#include <linux/pkeys.h>$' fs/proc/task_mmu.c; then
-              sed -i '/^#include <linux\/pkeys.h>$/a #include <trace/hooks/mm.h>' fs/proc/task_mmu.c
-              echo "✔ Restored mm.h include"
-            else
-              echo "⚠️ Anchor #include <linux/pkeys.h> not found — could not restore mm.h include, check fs/proc/task_mmu.c manually"
-            fi
-          else
-            echo "ℹ️ Skipping mm.h restore (not fake-patched or already present)"
-          fi
-          
           echo "✅ KSU configs added"
 
           echo "🎉 ReSukiSU installed and SUSFS for GKI android13-5.15 fully integrated!"
@@ -344,8 +292,13 @@ jobs:
 
   package-kernels:
     name: "📦 Package Kernels"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [build-kernels]
+    permissions:
+      contents: write
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_YASK_BOT_TOKEN }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
     steps:
       - name: "📥 Download kernel artifacts"
         uses: actions/download-artifact@v4
@@ -412,15 +365,24 @@ jobs:
           echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
           echo "✅ Package created: $ZIP_NAME"
 
+      - name: "📤 Upload release package artifact"
+        uses: actions/upload-artifact@v4
+        with:
+          name: YASK-package
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+          retention-days: 3
+
       - name: "⬆️ Upload to GitHub Release"
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        if: ${{ !inputs.test_only }}
+        uses: softprops/action-gh-release@v2
         with:
           files: ${{ env.ZIP_NAME }}
           tag_name: "YASK-NEXT"
+          target_commitish: ${{ github.sha }}
 
       - name: "📱 Send Telegram Notification"
+        if: ${{ !inputs.test_only && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHANNEL_ID != '' }}
         run: |
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/YASK-NEXT"
           BANNER_URL="https://raw.githubusercontent.com/topnotchfreaks/kernel_msm-5.15/builder/assets/yask.png"
@@ -457,12 +419,12 @@ jobs:
           ⬇️ [Download Here]($RELEASE_URL)"
 
             curl -s -X POST \
-              -d chat_id=${{ secrets.TELEGRAM_CHANNEL_ID }} \
+              -d chat_id="$TELEGRAM_CHANNEL_ID" \
               -d photo="${BANNER_URL}" \
               --data-urlencode "caption=${MESSAGE}" \
               -d parse_mode="Markdown" \
               -d disable_web_page_preview="false" \
-              "https://api.telegram.org/bot${{ secrets.TELEGRAM_YASK_BOT_TOKEN }}/sendPhoto"
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
 
           else
             FAILURE_MSG="❌ *YASK Kernel Build Failed*
@@ -482,9 +444,9 @@ jobs:
           🔍 Check the [workflow logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
            
             curl -s -X POST \
-              -d chat_id=${{ secrets.TELEGRAM_CHANNEL_ID }} \
+              -d chat_id="$TELEGRAM_CHANNEL_ID" \
               -d photo="${BANNER_URL}" \
               --data-urlencode "caption=${FAILURE_MSG}" \
               -d parse_mode="Markdown" \
-              "https://api.telegram.org/bot${{ secrets.TELEGRAM_YASK_BOT_TOKEN }}/sendPhoto"
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
           fi

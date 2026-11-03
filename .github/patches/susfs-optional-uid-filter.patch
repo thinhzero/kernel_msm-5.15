@@ -1,0 +1,19 @@
+--- a/fs/susfs.c
++++ b/fs/susfs.c
+@@ -180,6 +180,7 @@
+  * susfs_restore_creds() afterwards.
+  * Returns the original credentials on success, NULL on failure.
+  */
++#ifdef CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER
+ static struct cred *susfs_switch_to_ksu_domain(void) {
+ 	struct cred *orig_cred = NULL;
+ 	struct cred *cred = NULL;
+@@ -220,6 +221,8 @@
+ 
+ 	commit_creds(orig_cred);
+ }
++
++#endif /* CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER */
+ 
+ /* sus_path */
+ #ifdef CONFIG_KSU_SUSFS_SUS_PATH

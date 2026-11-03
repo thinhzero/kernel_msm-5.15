@@ -94,6 +94,9 @@ jobs:
       WORK_DIR: ${{ github.workspace }}
 
     steps:
+      - name: "📥 Checkout build patches"
+        uses: actions/checkout@v4
+
       - name: "✨ Setup workspace"
         run: |
           mkdir -p ${{ env.KERNEL_LOC_DIR }}
@@ -215,6 +218,12 @@ jobs:
           echo "✔ Copied include/linux/susfs.h"
           
           cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
+
+          # ReSukiSU does not expose SUSFS's optional priority UID filter.
+          # Compile its credential helpers only when that feature is enabled.
+          COMPAT_PATCH="${{ github.workspace }}/.github/patches/susfs-optional-uid-filter.patch"
+          patch --batch --forward --dry-run -p1 < "$COMPAT_PATCH"
+          patch --batch --forward -p1 < "$COMPAT_PATCH"
 
           # Clean up SUSFS repo (we only needed kernel patches, not KSU integration)
           rm -rf susfs4ksu

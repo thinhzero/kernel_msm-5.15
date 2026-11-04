@@ -181,14 +181,14 @@ jobs:
           echo "CONFIG_BBG=y" >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
-      - name: "🔧 Setup ReSukiSU with SUSFS"
+      - name: "🔧 Setup BakaSU with SUSFS"
         if: matrix.kernel.enable_ksu == true
         working-directory: ${{ env.KERNEL_LOC_DIR }}/${{ env.KERNEL_NAME }}
         run: |
           rm -rf ./KernelSU ./drivers/kernelsu
 
           echo "📦 Installing KSU..."
-          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
+          curl -fsSL "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s -- main
           
           echo "✔ KSU installed successfully"
           
@@ -219,7 +219,7 @@ jobs:
           
           cp -f susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
 
-          # ReSukiSU does not expose SUSFS's optional priority UID filter.
+          # BakaSU does not expose SUSFS's optional priority UID filter.
           # Compile its credential helpers only when that feature is enabled.
           COMPAT_PATCH="${{ github.workspace }}/.github/patches/susfs-optional-uid-filter.patch"
           patch --batch --forward --dry-run -p1 < "$COMPAT_PATCH"
@@ -228,7 +228,7 @@ jobs:
           # Clean up SUSFS repo (we only needed kernel patches, not KSU integration)
           rm -rf susfs4ksu
           
-          # ReSukiSU's setup script links drivers/kernelsu to KernelSU/kernel.
+          # BakaSU's setup script links drivers/kernelsu to KernelSU/kernel.
           test -f drivers/kernelsu/Kconfig
           test -f drivers/kernelsu/Makefile
 
@@ -248,7 +248,7 @@ jobs:
 
           echo "✅ KSU configs added"
 
-          echo "🎉 ReSukiSU installed and SUSFS for GKI android13-5.15 fully integrated!"
+          echo "🎉 BakaSU installed and SUSFS for GKI android13-5.15 fully integrated!"
 
       - name: "⚙️ Setup basic configs"
         working-directory: ${{ env.KERNEL_LOC_DIR }}/${{ env.KERNEL_NAME }}
@@ -346,7 +346,7 @@ jobs:
           ║     • Full LTO + -O2 Optimization                   ║
           ║     • Extra TCP Congestion (BBR, Westwood)          ║
           ║     • AOSP clang-r547379                            ║
-          ║     • Non-KSU & ReSukiSU + SUSFS support            ║
+          ║     • Non-KSU & BakaSU + SUSFS support              ║
           ║     • Baseband-Guard Support                        ║
           ║     • Metamodule Support                            ║
           ║                                                     ║
@@ -366,7 +366,7 @@ jobs:
           EOF
 
           # Create ZIP
-          ZIP_NAME="Anykernel3_YASK-ReSukiSU-AIO-FULL_$(date +'%Y-%m-%d').zip"
+          ZIP_NAME="Anykernel3_YASK-BakaSU-AIO-FULL_$(date +'%Y-%m-%d').zip"
           cd AnyKernel3
           zip -r9 "../$ZIP_NAME" * -x .git/*
           cd ..
@@ -403,7 +403,7 @@ jobs:
           • Kernel: \`Linux 5.15\`
           • Android: \`13-17\`
           • Base: \`GKI & CLO\`
-          • KSU: \`ReSukiSU\`
+          • KSU: \`BakaSU\`
           • SUSFS: \`Enabled (GKI A13-5.15)\`
           • LTO: \`Full\`
           • Optimization: \`-O2\`
@@ -419,7 +419,7 @@ jobs:
           • MKSU
           • Rissu-KSU
           • KowSU
-          • ReSukiSU (Main Root Manager)
+          • BakaSU (Main Root Manager)
           • SukiSU-Ultra
 
           🕐 *Build Date:* $(date '+%Y-%m-%d %H:%M:%S UTC')
@@ -442,7 +442,7 @@ jobs:
           • Kernel: \`Linux 5.15\`
           • Android: \`13-17\`
           • Base: \`GKI & CLO\`
-          • KSU: \`ReSukiSU\`
+          • KSU: \`BakaSU\`
           • SUSFS: \`Enabled (GKI A13-5.15)\`
           • LTO: \`Full\`
           • Optimization: \`-O2\`

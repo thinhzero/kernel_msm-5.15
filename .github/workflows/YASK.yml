@@ -38,7 +38,6 @@ jobs:
             extra_patches:
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-gki-fixup.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-sign-builds.patch"
-              - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-Don-t-append-and-dirty-to-localversion.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-do-not-ship-full-auto_localversion.patch"
           - name: "CLO"
             dir: "common_clo"
@@ -52,7 +51,6 @@ jobs:
             extra_patches:
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-gki-fixup.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-sign-builds.patch"
-              - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-Don-t-append-and-dirty-to-localversion.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-do-not-ship-full-auto_localversion.patch"
           - name: "GKI-NoKSU"
             dir: "common_gki_noksu"
@@ -66,7 +64,6 @@ jobs:
             extra_patches:
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-gki-fixup.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-sign-builds.patch"
-              - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-Don-t-append-and-dirty-to-localversion.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-do-not-ship-full-auto_localversion.patch"
           - name: "CLO-NoKSU"
             dir: "common_clo_noksu"
@@ -80,7 +77,6 @@ jobs:
             extra_patches:
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-gki-fixup.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-sign-builds.patch"
-              - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-Don-t-append-and-dirty-to-localversion.patch"
               - "https://raw.githubusercontent.com/topnotchfreaks/kernel_patches/main/0001-scripts-do-not-ship-full-auto_localversion.patch"
 
     env:
@@ -95,7 +91,7 @@ jobs:
 
     steps:
       - name: "📥 Checkout build patches"
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: "✨ Setup workspace"
         run: |
@@ -161,15 +157,17 @@ jobs:
           # Helper
           apply_patch() {
             local url="$1"
-            local file=$(basename "$url")
-            curl -L -o "$file" "$url"
-            patch -p1 < "$file" || echo "::warning::Hunks failed in $file"
+            local file
+            file=$(basename "$url")
+            curl -fsSL --retry 3 -o "$file" "$url"
+            patch --batch --forward --dry-run -p1 < "$file"
+            patch --batch --forward -p1 < "$file"
             rm -f "$file"
           }
 
           # Apply patches
-          echo '${{ toJSON(matrix.kernel.extra_patches) }}' | jq -r '.[]' | while read p; do
-            [ -n "$p" ] && apply_patch "$p"
+          echo '${{ toJSON(matrix.kernel.extra_patches) }}' | jq -r '.[]' | while IFS= read -r p; do
+            apply_patch "$p"
           done
 
       - name: "🔧 Add BBG Support (KSU variant only)"
@@ -293,7 +291,7 @@ jobs:
           cp Image "${{ env.OUTPUT_NAME }}"
 
       - name: "📤 Upload kernel artifact"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.kernel.name }}-kernel
           path: ${{ env.WORK_DIR }}/out/dist/${{ env.OUTPUT_NAME }}
@@ -310,7 +308,7 @@ jobs:
       TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
     steps:
       - name: "📥 Download kernel artifacts"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./artifacts/
 
@@ -375,7 +373,7 @@ jobs:
           echo "✅ Package created: $ZIP_NAME"
 
       - name: "📤 Upload release package artifact"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: YASK-package
           path: ${{ env.ZIP_NAME }}

@@ -17,6 +17,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: yask-${{ github.workflow }}
+  cancel-in-progress: false
         
 jobs:
   build-kernels:
@@ -88,6 +92,10 @@ jobs:
       LOCAL_VERSION: ${{ matrix.kernel.local_version }}
       OUTPUT_NAME: ${{ matrix.kernel.output_name }}
       WORK_DIR: ${{ github.workspace }}
+      VARIANT: ${{ matrix.kernel.name }}
+      ENABLE_KSU: ${{ matrix.kernel.enable_ksu }}
+      ARTIFACT_DIR: ${{ github.workspace }}/yask-artifact
+      METADATA_DIR: ${{ github.workspace }}/yask-artifact/metadata
 
     steps:
       - name: "📥 Checkout build patches"
@@ -95,7 +103,7 @@ jobs:
 
       - name: "✨ Setup workspace"
         run: |
-          mkdir -p ${{ env.KERNEL_LOC_DIR }}
+          mkdir -p "${{ env.KERNEL_LOC_DIR }}" "$METADATA_DIR/patches"
           echo "BUILD_TIME=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
           sudo apt-get update -qq
           sudo apt-get install -y repo rsync aria2
@@ -123,15 +131,22 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.15-lts --depth=1
           repo sync --optimized-fetch --prune -j8
           
+          # Preserve the exact AOSP build/toolchain revisions before cleanup.
+          repo manifest -r -o "$METADATA_DIR/aosp-manifest.xml"
+
           # Clean up existing repo and common directories
           rm -rf .repo
           rm -rf common
 
           # Download and setup custom clang toolchain
-          aria2c -x 16 -s 16 -o prebuilts/clang/host/linux-x86/clang-r547379.tar.gz "https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
+          CLANG_URL="https://github.com/topnotchfreaks/clang/releases/download/v1.0.0/clang-r547379.tar.gz"
+          aria2c -x 16 -s 16 -o prebuilts/clang/host/linux-x86/clang-r547379.tar.gz "$CLANG_URL"
+          printf '%s\n' "$CLANG_URL" > "$METADATA_DIR/clang-source.url"
+          sha256sum prebuilts/clang/host/linux-x86/clang-r547379.tar.gz > "$METADATA_DIR/clang-archive.sha256"
           mkdir -p prebuilts/clang/host/linux-x86/clang-r547379
           tar -xzf prebuilts/clang/host/linux-x86/clang-r547379.tar.gz -C prebuilts/clang/host/linux-x86/clang-r547379
           rm -rf prebuilts/clang/host/linux-x86/clang-r547379.tar.gz
+          prebuilts/clang/host/linux-x86/clang-r547379/bin/clang --version > "$METADATA_DIR/clang-version.txt"
 
           # Remove unused clang for more space
           rm -rf prebuilts/clang/host/linux-x86/clang-3289846
@@ -162,6 +177,8 @@ jobs:
             curl -fsSL --retry 3 -o "$file" "$url"
             patch --batch --forward --dry-run -p1 < "$file"
             patch --batch --forward -p1 < "$file"
+            cp "$file" "$METADATA_DIR/patches/"
+            printf '%s\t%s\n' "$file" "$url" >> "$METADATA_DIR/patch-sources.tsv"
             rm -f "$file"
           }
 
@@ -175,7 +192,8 @@ jobs:
         working-directory: ./${{ env.KERNEL_LOC_DIR }}/${{ env.KERNEL_NAME }}
         run: |
           echo "Adding BBG...";
-          wget -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash
+          wget -O "$METADATA_DIR/bbg-setup.sh" https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh
+          bash "$METADATA_DIR/bbg-setup.sh"
           echo "CONFIG_BBG=y" >> arch/arm64/configs/${{ env.DEFCONFIG_NAME }}
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
 
@@ -186,7 +204,8 @@ jobs:
           rm -rf ./KernelSU ./drivers/kernelsu
 
           echo "📦 Installing KSU..."
-          curl -fsSL "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" | bash -s -- main
+          curl -fsSL "https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh" -o "$METADATA_DIR/bakasu-setup.sh"
+          bash "$METADATA_DIR/bakasu-setup.sh" main
           
           echo "✔ KSU installed successfully"
           
@@ -194,7 +213,9 @@ jobs:
           echo "📦 Cloning SUSFS4KSU for kernel patches..."
           git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
 
+          git -C susfs4ksu rev-parse HEAD > "$METADATA_DIR/susfs.commit"
           SUSFS_KERNEL_PATCH="susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          cp "$SUSFS_KERNEL_PATCH" "$METADATA_DIR/patches/susfs-kernel.patch"
 
           # The include hunks require the original Android trace-hook headers.
           # Check the entire patch before applying it; copied source files cannot
@@ -222,6 +243,7 @@ jobs:
           COMPAT_PATCH="${{ github.workspace }}/.github/patches/susfs-optional-uid-filter.patch"
           patch --batch --forward --dry-run -p1 < "$COMPAT_PATCH"
           patch --batch --forward -p1 < "$COMPAT_PATCH"
+          cp "$COMPAT_PATCH" "$METADATA_DIR/patches/"
 
           # Clean up SUSFS repo (we only needed kernel patches, not KSU integration)
           rm -rf susfs4ksu
@@ -285,17 +307,86 @@ jobs:
           BUILD_CONFIG=${{ env.KERNEL_LOC_DIR }}/${{ env.KERNEL_NAME }}/build.config.gki.aarch64 \
           build/build.sh -j$(nproc --all)
 
-      - name: "📁 Copy kernel image"
-        working-directory: ${{ env.WORK_DIR }}/out/dist
+      - name: "📁 Prepare image and build manifest"
         run: |
-          cp Image "${{ env.OUTPUT_NAME }}"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          workspace = Path(os.environ["WORK_DIR"])
+          kernel = workspace / os.environ["KERNEL_LOC_DIR"] / os.environ["KERNEL_NAME"]
+          artifact = Path(os.environ["ARTIFACT_DIR"])
+          metadata = Path(os.environ["METADATA_DIR"])
+          build_dir = workspace / "out" / os.environ["KERNEL_LOC_DIR"] / os.environ["KERNEL_NAME"]
+          image = workspace / "out/dist/Image"
+          if not image.is_file() or image.stat().st_size == 0:
+              raise SystemExit("Kernel Image is missing or empty")
+          with image.open("rb") as stream:
+              if stream.read(64)[56:60] != b"ARM\x64":
+                  raise SystemExit("Kernel Image does not have an ARM64 header")
+          config = workspace / "out/dist/.config"
+          if not config.is_file():
+              config = build_dir / ".config"
+          if not config.is_file() or config.stat().st_size == 0:
+              raise SystemExit("Effective kernel .config is missing or empty")
+          shutil.copy2(image, artifact / os.environ["OUTPUT_NAME"])
+          shutil.copy2(config, metadata / "kernel.config")
+
+          def sha256(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+
+          def source(path, repository, branch=None):
+              commit = subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
+              return {"repository": repository, "branch": branch, "commit": commit}
+
+          ksu = os.environ["ENABLE_KSU"] == "true"
+          patch_sources = dict(line.split("\t", 1) for line in (metadata / "patch-sources.tsv").read_text().splitlines())
+          patches = [{"file": "patches/" + path.name, "source": patch_sources.get(path.name), "sha256": sha256(path)}
+                     for path in sorted((metadata / "patches").glob("*.patch"))]
+          manifest = {
+              "schema_version": 1,
+              "variant": os.environ["VARIANT"],
+              "workflow": {
+                  "repository": os.environ["GITHUB_REPOSITORY"], "commit": os.environ["GITHUB_SHA"],
+                  "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                  "url": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              },
+              "kernel": {
+                  **source(kernel, os.environ["KERNEL_REPO"], os.environ["KERNEL_BRANCH"]),
+                  "version": subprocess.check_output(["make", "-s", "kernelversion"], cwd=kernel, text=True).strip(),
+                  "release": (build_dir / "include/config/kernel.release").read_text().strip(),
+              },
+              "bakasu": source(kernel / "KernelSU", "https://github.com/Baka-SU/BakaSU", "main") if ksu else None,
+              "susfs": {"repository": "https://gitlab.com/simonpunk/susfs4ksu.git", "branch": "gki-android13-5.15",
+                        "commit": (metadata / "susfs.commit").read_text().strip()} if ksu else None,
+              "baseband_guard": source(kernel / "Baseband-guard", "https://github.com/vc-teahouse/Baseband-guard", "main") if ksu else None,
+              "toolchain": {
+                  "clang_version": (metadata / "clang-version.txt").read_text().strip(),
+                  "archive_url": (metadata / "clang-source.url").read_text().strip(),
+                  "archive_sha256": (metadata / "clang-archive.sha256").read_text().split()[0],
+                  "aosp_manifest": "aosp-manifest.xml", "aosp_manifest_sha256": sha256(metadata / "aosp-manifest.xml"),
+              },
+              "build": {"lto": "full", "config": "kernel.config", "config_sha256": sha256(metadata / "kernel.config")},
+              "patches": patches,
+              "setup_scripts": {path.name: sha256(path) for path in sorted(metadata.glob("*-setup.sh"))},
+              "image": {"name": os.environ["OUTPUT_NAME"], "size": image.stat().st_size, "sha256": sha256(image)},
+          }
+          (metadata / "build.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          print(f'Prepared {manifest["variant"]}: {manifest["kernel"]["release"]}')
+          PY
 
       - name: "📤 Upload kernel artifact"
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.kernel.name }}-kernel
-          path: ${{ env.WORK_DIR }}/out/dist/${{ env.OUTPUT_NAME }}
-          retention-days: 1
+          path: ${{ env.ARTIFACT_DIR }}/
+          if-no-files-found: error
+          retention-days: 3
 
   package-kernels:
     name: "📦 Package Kernels"
@@ -303,24 +394,84 @@ jobs:
     needs: [build-kernels]
     permissions:
       contents: write
+    outputs:
+      zip_name: ${{ steps.package.outputs.zip_name }}
+      release_url: ${{ steps.package.outputs.release_url }}
     env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_YASK_BOT_TOKEN }}
-      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+      RELEASE_TAG: YASK-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: "📥 Download kernel artifacts"
         uses: actions/download-artifact@v8
         with:
           path: ./artifacts/
 
-      - name: "📦 Create release package"
+      - name: "📦 Validate and create release package"
+        id: package
         run: |
-          set -e
-
-          # Clone AnyKernel3
           git clone --depth=1 https://github.com/topnotchfreaks/AnyKernel3 -b YASK AnyKernel3
 
-          # Copy kernel images
-          find ./artifacts -name "Image.*" -exec cp {} AnyKernel3/ \;
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          import subprocess
+          from pathlib import Path
+
+          root = Path("AnyKernel3")
+          expected = {"Image.gki.ksu": "GKI", "Image.gki.noksu": "GKI-NoKSU",
+                      "Image.clo.ksu": "CLO", "Image.clo.noksu": "CLO-NoKSU"}
+
+          def sha256(path):
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+
+          builds = []
+          # Validate the entire set before copying any kernel into the installer.
+          for image, variant in expected.items():
+              matches = list(Path("artifacts").rglob(image))
+              if len(matches) != 1 or not matches[0].is_file() or matches[0].stat().st_size == 0:
+                  raise SystemExit(f"Expected exactly one non-empty {image}, found {len(matches)}")
+              source = matches[0]
+              metadata = source.parent / "metadata"
+              manifest = json.loads((metadata / "build.json").read_text())
+              if manifest["variant"] != variant or manifest["image"]["name"] != image:
+                  raise SystemExit(f"Variant mismatch for {image}")
+              if manifest["workflow"]["run_id"] != os.environ["GITHUB_RUN_ID"] or manifest["workflow"]["commit"] != os.environ["GITHUB_SHA"]:
+                  raise SystemExit(f"Build provenance mismatch for {image}")
+              if manifest["image"]["sha256"] != sha256(source) or manifest["image"]["size"] != source.stat().st_size:
+                  raise SystemExit(f"Image checksum/size mismatch for {image}")
+              if manifest["build"]["config_sha256"] != sha256(metadata / "kernel.config"):
+                  raise SystemExit(f"Config checksum mismatch for {image}")
+              if manifest["toolchain"]["aosp_manifest_sha256"] != sha256(metadata / manifest["toolchain"]["aosp_manifest"]):
+                  raise SystemExit(f"AOSP manifest checksum mismatch for {image}")
+              for patch in manifest["patches"]:
+                  if patch["sha256"] != sha256(metadata / patch["file"]):
+                      raise SystemExit(f"Patch checksum mismatch for {image}: {patch['file']}")
+              for script, digest in manifest["setup_scripts"].items():
+                  if digest != sha256(metadata / script):
+                      raise SystemExit(f"Setup script checksum mismatch for {image}: {script}")
+              builds.append((source, metadata, manifest))
+          for source, metadata, manifest in builds:
+              shutil.copy2(source, root / source.name)
+              shutil.copytree(metadata, root / "metadata" / manifest["variant"], dirs_exist_ok=True)
+          if {path.name for path in root.glob("Image.*")} != set(expected):
+              raise SystemExit("Installer contains unexpected kernel images")
+          package_manifest = {
+              "schema_version": 1,
+              "workflow": builds[0][2]["workflow"],
+              "package_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "release_tag": os.environ["RELEASE_TAG"],
+              "anykernel3": {"repository": "https://github.com/topnotchfreaks/AnyKernel3", "branch": "YASK",
+                             "commit": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()},
+              "kernels": [manifest for _, _, manifest in builds],
+          }
+          (root / "BUILD-MANIFEST.json").write_text(json.dumps(package_manifest, indent=2) + "\n")
+          files = [root / name for name in expected] + [root / "BUILD-MANIFEST.json"]
+          files += [path for path in (root / "metadata").rglob("*") if path.is_file()]
+          (root / "SHA256SUMS").write_text("".join(f"{sha256(path)}  {path.relative_to(root)}\n" for path in sorted(files)))
+          print("Validated all four kernel images, manifests and effective configs")
+          PY
 
           # Create banner
           cat > AnyKernel3/banner << 'EOF'
@@ -363,20 +514,23 @@ jobs:
           Installing YASK Kernel...
           EOF
 
-          # Create ZIP
-          ZIP_NAME="Anykernel3_YASK-BakaSU-AIO-FULL_$(date +'%Y-%m-%d').zip"
+          ZIP_NAME="Anykernel3_YASK-BakaSU-AIO-FULL_$(date +'%Y-%m-%d')_${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.zip"
           cd AnyKernel3
-          zip -r9 "../$ZIP_NAME" * -x .git/*
+          sha256sum -c SHA256SUMS
+          zip -r9 "../$ZIP_NAME" * -x '.git/*'
           cd ..
-          
-          echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
-          echo "✅ Package created: $ZIP_NAME"
+          sha256sum "$ZIP_NAME" > "$ZIP_NAME.sha256"
+          echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+          echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: "📤 Upload release package artifact"
         uses: actions/upload-artifact@v7
         with:
           name: YASK-package
-          path: ${{ env.ZIP_NAME }}
+          path: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME }}.sha256
           if-no-files-found: error
           retention-days: 3
 
@@ -384,76 +538,64 @@ jobs:
         if: ${{ !inputs.test_only }}
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.ZIP_NAME }}
-          tag_name: "YASK-NEXT"
+          files: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME }}.sha256
+          fail_on_unmatched_files: true
+          tag_name: ${{ env.RELEASE_TAG }}
           target_commitish: ${{ github.sha }}
 
-      - name: "📱 Send Telegram Notification"
+  notify:
+    name: "📱 Report build result"
+    runs-on: ubuntu-24.04
+    needs: [build-kernels, package-kernels]
+    if: ${{ always() && !cancelled() }}
+    env:
+      TEST_ONLY: ${{ inputs.test_only == true }}
+      BUILD_RESULT: ${{ needs.build-kernels.result }}
+      PACKAGE_RESULT: ${{ needs.package-kernels.result }}
+      RELEASE_URL: ${{ needs.package-kernels.outputs.release_url }}
+      ZIP_NAME: ${{ needs.package-kernels.outputs.zip_name }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_YASK_BOT_TOKEN }}
+      TELEGRAM_CHANNEL_ID: ${{ secrets.TELEGRAM_CHANNEL_ID }}
+      BANNER_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/assets/yask.png
+    steps:
+      - name: "Prepare result message"
+        run: |
+          LOG_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if [[ "$BUILD_RESULT" == "success" && "$PACKAGE_RESULT" == "success" ]]; then
+            DOWNLOAD_URL="$RELEASE_URL"
+            BUILD_LABEL="YASK kernel build successful"
+            if [[ "$TEST_ONLY" == "true" ]]; then
+              DOWNLOAD_URL="$LOG_URL"
+              BUILD_LABEL="YASK kernel test build successful (artifacts only)"
+            fi
+            MESSAGE="✅ $BUILD_LABEL
+          GKI & CLO • BakaSU + SUSFS • Full LTO
+          Package: $ZIP_NAME
+          Download: $DOWNLOAD_URL
+          Logs: $LOG_URL"
+          else
+            MESSAGE="❌ YASK kernel build failed
+          Build: $BUILD_RESULT
+          Package/release: $PACKAGE_RESULT
+          Logs: $LOG_URL"
+          fi
+          printf '%s\n' "$MESSAGE" > notification.txt
+          cat notification.txt >> "$GITHUB_STEP_SUMMARY"
+
+      - name: "Send Telegram notification"
         if: ${{ !inputs.test_only && env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHANNEL_ID != '' }}
         run: |
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/YASK-NEXT"
-          BANNER_URL="https://raw.githubusercontent.com/topnotchfreaks/kernel_msm-5.15/builder/assets/yask.png"
-
-          if [[ "${{ job.status }}" == "success" ]]; then
-            MESSAGE="✅ *YASK Kernel Released*
-
-          📦 *Build Information:*
-          • Kernel: \`Linux 5.15\`
-          • Android: \`13-17\`
-          • Base: \`GKI & CLO\`
-          • KSU: \`BakaSU\`
-          • SUSFS: \`Enabled (GKI A13-5.15)\`
-          • LTO: \`Full\`
-          • Optimization: \`-O2\`
-          • BBG: \`Enabled\`
-
-          📱 *Supported Devices:*
-          • Redmi Note 12 4G/NFC
-          • Redmi Note 13 4G/NFC
-          • Redmi Pad SE
-
-          📱 *Supported Manager:*
-          • KSU by tiann
-          • MKSU
-          • Rissu-KSU
-          • KowSU
-          • BakaSU (Main Root Manager)
-          • SukiSU-Ultra
-
-          🕐 *Build Date:* $(date '+%Y-%m-%d %H:%M:%S UTC')
-          📦 *Package:* \`${{ env.ZIP_NAME }}\`
-
-          ⬇️ [Download Here]($RELEASE_URL)"
-
-            curl -s -X POST \
-              -d chat_id="$TELEGRAM_CHANNEL_ID" \
-              -d photo="${BANNER_URL}" \
-              --data-urlencode "caption=${MESSAGE}" \
-              -d parse_mode="Markdown" \
-              -d disable_web_page_preview="false" \
-              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
-
-          else
-            FAILURE_MSG="❌ *YASK Kernel Build Failed*
-            
-          📦 *Build Information:*
-          • Kernel: \`Linux 5.15\`
-          • Android: \`13-17\`
-          • Base: \`GKI & CLO\`
-          • KSU: \`BakaSU\`
-          • SUSFS: \`Enabled (GKI A13-5.15)\`
-          • LTO: \`Full\`
-          • Optimization: \`-O2\`
-          • BBG: \`Enabled\`
-          
-          🕐 *Failed at:* $(date '+%Y-%m-%d %H:%M:%S UTC')
-
-          🔍 Check the [workflow logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details."
-           
-            curl -s -X POST \
-              -d chat_id="$TELEGRAM_CHANNEL_ID" \
-              -d photo="${BANNER_URL}" \
-              --data-urlencode "caption=${FAILURE_MSG}" \
-              -d parse_mode="Markdown" \
-              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto"
-          fi
+          curl -fsS --max-time 30 -X POST \
+            --data-urlencode "chat_id=$TELEGRAM_CHANNEL_ID" \
+            --data-urlencode "photo=$BANNER_URL" \
+            --data-urlencode "caption=$(cat notification.txt)" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto" > telegram-response.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          response = json.loads(Path("telegram-response.json").read_text())
+          if not response.get("ok"):
+              raise SystemExit("Telegram API rejected the notification: " + str(response.get("description", "unknown error")))
+          PY
